@@ -1,0 +1,23 @@
+{
+  "name": "Quectel Ubuntu 24.04",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteUser": "root",
+  "runArgs": [
+    "--privileged",
+    "--device-cgroup-rule=c 188:* rmw",
+    "--volume=/dev:/dev",
+    "--network=host"
+  ],
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-python.python"
+      ]
+    }
+  }
+}
