@@ -1,9 +1,9 @@
 [submodule "quectel_QCom"]
 	path = quectel_QCom
-	url = git@github.com:Jinjin-Wang07/quectel_QCom.git
+	url = https://github.com/Jinjin-Wang07/quectel_QCom.git
 [submodule "quectel_qlog"]
 	path = quectel_qlog
-	url = git@github.com:Jinjin-Wang07/quectel_qlog.git
+	url = https://github.com/Jinjin-Wang07/quectel_qlog.git
 [submodule "scat"]
 	path = scat
 	url = https://github.com/fgsect/scat.git
