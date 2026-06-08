@@ -47,14 +47,14 @@ pause_step() {
 }
 
 # Step 1: verify AT and QMI device nodes exist.
-echo "[1/5] Checking modem device nodes..."
+echo "[1/6] Checking modem device nodes..."
 [[ -e "${AT_PORT}" ]] || error_exit "AT device not found: ${AT_PORT}"
 [[ -e "${QMI_DEV}" ]] || error_exit "QMI device not found: ${QMI_DEV}"
 echo "[OK] Found ${AT_PORT} and ${QMI_DEV}"
 pause_step
 
 # Step 2: verify build outputs and configs are available.
-echo "[2/5] Checking required binaries and configs..."
+echo "[2/6] Checking required binaries and configs..."
 [[ -e "${QLOG_BIN}" ]] || error_exit "QLog binary not found: ${QLOG_BIN}. Run ./1_setup.sh first."
 [[ -e "${QCOM_BIN}" ]] || error_exit "QCom binary not found: ${QCOM_BIN}. Run ./1_setup.sh first."
 [[ -e "${QLOG_CFG}" ]] || error_exit "QLog config not found: ${QLOG_CFG}"
@@ -66,7 +66,7 @@ pause_step
 [[ -r "${AT_PORT}" && -w "${AT_PORT}" ]] || error_exit "No read/write access on ${AT_PORT}. Run with sudo."
 
 # Step 3: send ATI command and confirm the modem identity contains "quectel".
-echo "[3/5] Sending ATI on ${AT_PORT} and checking modem identity..."
+echo "[3/6] Sending ATI on ${AT_PORT} and checking modem identity..."
 
 # Configure serial, send ATI, and read a short response window.
 OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
@@ -104,6 +104,40 @@ fi
 echo "[OK] Modem available"
 pause_step
 
+# Step 4: check SIM status and stop if SIM is absent.
+echo "[4/6] Checking SIM status on ${AT_PORT}..."
+
+OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
+stty -F "${AT_PORT}" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo min 0 time 5 2>/dev/null || true
+
+SIM_RESPONSE=""
+exec 3<>"${AT_PORT}" || error_exit "Failed to open ${AT_PORT}"
+printf 'AT+CPIN?\r' >&3 || { exec 3>&- 3<&-; cleanup_stty; error_exit "Failed to write AT+CPIN? to ${AT_PORT}"; }
+
+DEADLINE=$((SECONDS + 5))
+while (( SECONDS < DEADLINE )); do
+    if IFS= read -r -t 0.5 line <&3; then
+        SIM_RESPONSE+="${line}"$'\n'
+        [[ "${line}" == "OK" ]] && break
+    fi
+done
+
+exec 3>&-
+exec 3<&-
+cleanup_stty
+
+if printf '%s' "${SIM_RESPONSE}" | grep -Eqi "(NOT INSERTED|SIM NOT INSERTED|\+CME ERROR)"; then
+    echo "[WARN] SIM is absent. Please insert the SIM card."
+    error_exit "SIM absent. Please insert the SIM card, then run this script again."
+fi
+
+if ! printf '%s' "${SIM_RESPONSE}" | grep -qi "\+CPIN: READY"; then
+    error_exit "Unable to confirm SIM ready state. AT+CPIN? response was: ${SIM_RESPONSE//$'\n'/ ; }"
+fi
+
+echo "[OK] SIM is ready"
+pause_step
+
 # Ensure QLog output directory exists.
 mkdir -p "${QLOG_SAVE_DIR}"
 
@@ -118,8 +152,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Step 4: start QLog in its own project directory.
-echo "[4/5] Starting QLog from ${QLOG_DIR}..."
+# Step 5: start QLog in its own project directory.
+echo "[5/6] Starting QLog from ${QLOG_DIR}..."
 (
     cd "${QLOG_DIR}"
     ${SUDO} ./out/QLog -p "${DIAG_PORT}" -s ./log -f ./conf/defaultNR5G1216.cfg -m 200 -n 20
@@ -128,8 +162,8 @@ QLOG_PID=$!
 echo "[OK] QLog started (pid ${QLOG_PID})"
 pause_step
 
-# Step 5: run QCom test tool in its own project directory.
-echo "[5/5] Starting QCom from ${QCOM_DIR}..."
+# Step 6: run QCom test tool in its own project directory.
+echo "[6/6] Starting QCom from ${QCOM_DIR}..."
 pause_step
 (
     cd "${QCOM_DIR}"
