@@ -10,6 +10,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Require sudo/root so device and service operations do not fail later.
+if [[ "${EUID}" -ne 0 ]]; then
+    echo "[ERROR] Please run this script with sudo (for example: sudo ./2_run_5g_capture.sh)" >&2
+    exit 1
+fi
+
 # Modem device defaults (can be overridden with environment variables).
 AT_PORT="${AT_PORT:-/dev/ttyUSB2}"
 QMI_DEV="${QMI_DEV:-/dev/cdc-wdm0}"
@@ -24,19 +30,19 @@ QLOG_BIN="${QLOG_DIR}/out/QLog"
 QCOM_BIN="${QCOM_DIR}/out/quectel-cm-test"
 QLOG_CFG="${QLOG_DIR}/conf/defaultNR5G1216.cfg"
 QCOM_CFG="${QCOM_DIR}/configs/qcm-5g.conf"
-QLOG_SAVE_DIR="${QLOG_DIR}/log"
+QLOG_SAVE_DIR="${ROOT_DIR}/output"
 
 STEP_SLEEP="${STEP_SLEEP:-2}"
 STOP_MODEMMANAGER="${STOP_MODEMMANAGER:-1}"
 MODEM_RESET_BEFORE_RUN="${MODEM_RESET_BEFORE_RUN:-1}"
 MODEM_RESET_WAIT_SEC="${MODEM_RESET_WAIT_SEC:-8}"
+PING_IFACE="${PING_IFACE:-wwan0}"
+PING_TARGET="${PING_TARGET:-8.8.8.8}"
+PING_COUNT="${PING_COUNT:-4}"
+PING_START_DELAY_SEC="${PING_START_DELAY_SEC:-10}"
 
-# Use sudo only when not already running as root.
-if [[ "${EUID}" -eq 0 ]]; then
-    SUDO=""
-else
-    SUDO="sudo"
-fi
+# Script requires root privileges, so no sudo prefix is needed.
+SUDO=""
 
 # Print an error and stop immediately.
 error_exit() {
@@ -127,7 +133,7 @@ reset_modem_if_needed() {
 }
 
 # Step 1: verify AT and QMI device nodes exist.
-echo "[1/6] Checking modem device nodes..."
+echo "[1/7] Checking modem device nodes..."
 [[ -e "${AT_PORT}" ]] || error_exit "AT device not found: ${AT_PORT}"
 [[ -e "${QMI_DEV}" ]] || error_exit "QMI device not found: ${QMI_DEV}"
 echo "[OK] Found ${AT_PORT} and ${QMI_DEV}"
@@ -137,7 +143,7 @@ stop_modemmanager_if_needed
 reset_modem_if_needed
 
 # Step 2: verify build outputs and configs are available.
-echo "[2/6] Checking required binaries and configs..."
+echo "[2/7] Checking required binaries and configs..."
 [[ -e "${QLOG_BIN}" ]] || error_exit "QLog binary not found: ${QLOG_BIN}. Run ./1_setup.sh first."
 [[ -e "${QCOM_BIN}" ]] || error_exit "QCom binary not found: ${QCOM_BIN}. Run ./1_setup.sh first."
 [[ -e "${QLOG_CFG}" ]] || error_exit "QLog config not found: ${QLOG_CFG}"
@@ -149,7 +155,7 @@ pause_step
 [[ -r "${AT_PORT}" && -w "${AT_PORT}" ]] || error_exit "No read/write access on ${AT_PORT}. Run with sudo."
 
 # Step 3: send ATI command and confirm the modem identity contains "quectel".
-echo "[3/6] Sending ATI on ${AT_PORT} and checking modem identity..."
+echo "[3/7] Sending ATI on ${AT_PORT} and checking modem identity..."
 
 # Configure serial, send ATI, and read a short response window.
 OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
@@ -181,7 +187,7 @@ echo "[OK] Modem available"
 pause_step
 
 # Step 4: check SIM status and stop if SIM is absent.
-echo "[4/6] Checking SIM status on ${AT_PORT}..."
+echo "[4/7] Checking SIM status on ${AT_PORT}..."
 
 OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
 stty -F "${AT_PORT}" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo min 0 time 5 2>/dev/null || true
@@ -216,6 +222,7 @@ pause_step
 
 # Ensure QLog output directory exists.
 mkdir -p "${QLOG_SAVE_DIR}"
+QLOG_STDOUT_LOG="${QLOG_SAVE_DIR}/qlog_$(date +%Y%m%d_%H%M%S).log"
 
 QLOG_PID=""
 # Stop background QLog when this script exits or is interrupted.
@@ -229,19 +236,40 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Step 5: start QLog in its own project directory.
-echo "[5/6] Starting QLog from ${QLOG_DIR}..."
+echo "[5/7] Starting QLog from ${QLOG_DIR}..."
 (
     cd "${QLOG_DIR}"
-    ${SUDO} ./out/QLog -p "${DIAG_PORT}" -s ./log -f ./conf/defaultNR5G1216.cfg -m 200 -n 20
+    ${SUDO} ./out/QLog -p "${DIAG_PORT}" -s "${QLOG_SAVE_DIR}" -f "${QLOG_CFG}" -m 200 -n 20 >"${QLOG_STDOUT_LOG}" 2>&1
 ) &
 QLOG_PID=$!
-echo "[OK] QLog started (pid ${QLOG_PID})"
+echo "[OK] QLog started (pid ${QLOG_PID}), log: ${QLOG_STDOUT_LOG}"
 pause_step
 
 # Step 6: run QCom test tool in its own project directory.
-echo "[6/6] Starting QCom from ${QCOM_DIR}..."
+echo "[6/7] Starting QCom from ${QCOM_DIR}..."
 pause_step
 (
     cd "${QCOM_DIR}"
-    ${SUDO} ./out/quectel-cm-test -c ./configs/qcm-5g.conf
-)
+    ${SUDO} ./out/quectel-cm-test -q -c ./configs/qcm-5g.conf
+) &
+QCOM_PID=$!
+echo "[OK] QCom started (pid ${QCOM_PID})"
+
+# Step 7: verify data connectivity after QCom has had time to bring up data.
+echo "[7/7] Waiting ${PING_START_DELAY_SEC}s, then testing connectivity with ping..."
+sleep "${PING_START_DELAY_SEC}"
+
+PING_LOG="${QLOG_SAVE_DIR}/ping_$(date +%Y%m%d_%H%M%S).log"
+if ping -I "${PING_IFACE}" -c "${PING_COUNT}" -W 2 "${PING_TARGET}" >"${PING_LOG}" 2>&1; then
+    PING_STATS_LINE="$(grep -E "packets transmitted|packet loss" "${PING_LOG}" | tail -n1 || true)"
+    PING_RTT_LINE="$(grep -E "rtt min/avg/max|round-trip min/avg/max" "${PING_LOG}" | tail -n1 || true)"
+    echo "[OK] Connectivity test PASSED on ${PING_IFACE} -> ${PING_TARGET}"
+    [[ -n "${PING_STATS_LINE}" ]] && echo "[INFO] ${PING_STATS_LINE}"
+    [[ -n "${PING_RTT_LINE}" ]] && echo "[INFO] ${PING_RTT_LINE}"
+else
+    PING_STATS_LINE="$(grep -E "packets transmitted|packet loss" "${PING_LOG}" | tail -n1 || true)"
+    echo "[ERROR] Connectivity test FAILED on ${PING_IFACE} -> ${PING_TARGET}. See ${PING_LOG}"
+    [[ -n "${PING_STATS_LINE}" ]] && echo "[INFO] ${PING_STATS_LINE}"
+fi
+
+wait "${QCOM_PID}"
