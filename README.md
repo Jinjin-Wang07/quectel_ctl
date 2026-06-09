@@ -120,3 +120,72 @@ Test connectivity from `wwan0`:
 ping -I wwan0 8.8.8.8
 ```
 
+## 5. Parse and Check Logs with SCAT
+
+Use SCAT to parse Quectel QLog dump files (`.qmdl2`) and validate parsed PCAP output.
+
+### Setup SCAT environment
+
+Run the setup helper:
+
+```bash
+./3_setup_scat.sh
+```
+
+What this script does:
+- creates a local virtual environment at `.venv-scat`
+- installs SCAT from `./scat` in editable mode with `fastcrc`
+- installs `tshark` if it is missing
+
+Activate the environment:
+
+```bash
+source .venv-scat/bin/activate
+```
+
+### Example of dump file parsing
+
+```bash
+scat -t qc -d quectel_qlog/log/20260608_154826_0000.qmdl2 -F out.pcap
+```
+
+### Check parsed PCAP result
+
+1. Activate SCAT virtual environment:
+
+```bash
+source .venv-scat/bin/activate
+```
+
+2. Run the automated parser + checker pipeline:
+
+```bash
+./4_check_pcap_result.sh
+```
+
+This command will:
+- read `.qmdl2` files from `quectel_qlog/log` (or `quectel_qlog/out/logs`)
+- copy source logs to `./output`
+- parse `.qmdl2` to `.pcap` using `scat`
+- validate each `.pcap` contains both `RRC Setup` and `RRC Reconfiguration`
+
+
+3. Optional: run with explicit paths:
+
+```bash
+./4_check_pcap_result.sh ./quectel_qlog/log ./scat/wireshark/scat.lua
+```
+
+4. Check generated outputs:
+
+```bash
+ls -lh ./output
+```
+
+Expected checker result:
+- `[OK] Found both: RRC Setup and RRC Reconfiguration`
+
+5. Optional: open generated PCAP files in Wireshark and verify control-plane signaling is visible (NAS/RRC over GSMTAP).
+
+If Wireshark does not decode some LTE/NR layers, install the SCAT Lua plugin from `scat/wireshark/scat.lua` into your Wireshark plugin directory.
+

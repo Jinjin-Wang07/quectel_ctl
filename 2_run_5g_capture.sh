@@ -27,6 +27,9 @@ QCOM_CFG="${QCOM_DIR}/configs/qcm-5g.conf"
 QLOG_SAVE_DIR="${QLOG_DIR}/log"
 
 STEP_SLEEP="${STEP_SLEEP:-2}"
+STOP_MODEMMANAGER="${STOP_MODEMMANAGER:-1}"
+MODEM_RESET_BEFORE_RUN="${MODEM_RESET_BEFORE_RUN:-1}"
+MODEM_RESET_WAIT_SEC="${MODEM_RESET_WAIT_SEC:-8}"
 
 # Use sudo only when not already running as root.
 if [[ "${EUID}" -eq 0 ]]; then
@@ -46,12 +49,92 @@ pause_step() {
     sleep "${STEP_SLEEP}"
 }
 
+# Restore original serial settings when AT probing is done.
+cleanup_stty() {
+    if [[ -n "${OLD_STTY:-}" ]]; then
+        stty -F "${AT_PORT}" "${OLD_STTY}" 2>/dev/null || true
+    fi
+}
+
+# Stop ModemManager to avoid conflicts on cdc-wdm after USB reconnect.
+stop_modemmanager_if_needed() {
+    if [[ "${STOP_MODEMMANAGER}" != "1" ]]; then
+        return 0
+    fi
+
+    if ! command -v systemctl >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if systemctl is-active --quiet ModemManager; then
+        echo "[INFO] ModemManager is active; stopping it to avoid QMI conflicts..."
+        ${SUDO} systemctl stop ModemManager || error_exit "Failed to stop ModemManager"
+        # Give systemd a moment to tear down qmi-proxy users.
+        sleep 1
+    fi
+}
+
+# Send a best-effort AT command and collect lines until OK/ERROR or timeout.
+run_at_command() {
+    local cmd="$1"
+    local timeout_sec="${2:-5}"
+    local response=""
+    local deadline
+
+    exec 3<>"${AT_PORT}" || error_exit "Failed to open ${AT_PORT}"
+    printf '%s\r' "${cmd}" >&3 || { exec 3>&- 3<&-; cleanup_stty; error_exit "Failed to write ${cmd} to ${AT_PORT}"; }
+
+    deadline=$((SECONDS + timeout_sec))
+    while (( SECONDS < deadline )); do
+        if IFS= read -r -t 0.5 line <&3; then
+            response+="${line}"$'\n'
+            [[ "${line}" == "OK" || "${line}" == "ERROR" ]] && break
+        fi
+    done
+
+    exec 3>&-
+    exec 3<&-
+    printf '%s' "${response}"
+}
+
+# Soft reset radio stack to recover from unstable state after cable replug.
+reset_modem_if_needed() {
+    local reset_response=""
+
+    if [[ "${MODEM_RESET_BEFORE_RUN}" != "1" ]]; then
+        return 0
+    fi
+
+    echo "[INFO] Resetting modem radio stack (AT+CFUN=0/1) before capture..."
+    OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
+    stty -F "${AT_PORT}" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo min 0 time 5 2>/dev/null || true
+
+    reset_response="$(run_at_command 'AT+CFUN=0' 5 || true)"
+    if ! printf '%s' "${reset_response}" | grep -qi "OK"; then
+        cleanup_stty
+        error_exit "AT+CFUN=0 failed on ${AT_PORT}. Response: ${reset_response//$'\n'/ ; }"
+    fi
+
+    sleep 2
+
+    reset_response="$(run_at_command 'AT+CFUN=1' 5 || true)"
+    cleanup_stty
+    if ! printf '%s' "${reset_response}" | grep -qi "OK"; then
+        error_exit "AT+CFUN=1 failed on ${AT_PORT}. Response: ${reset_response//$'\n'/ ; }"
+    fi
+
+    sleep "${MODEM_RESET_WAIT_SEC}"
+}
+
 # Step 1: verify AT and QMI device nodes exist.
 echo "[1/6] Checking modem device nodes..."
 [[ -e "${AT_PORT}" ]] || error_exit "AT device not found: ${AT_PORT}"
 [[ -e "${QMI_DEV}" ]] || error_exit "QMI device not found: ${QMI_DEV}"
 echo "[OK] Found ${AT_PORT} and ${QMI_DEV}"
 pause_step
+
+stop_modemmanager_if_needed
+reset_modem_if_needed
 
 # Step 2: verify build outputs and configs are available.
 echo "[2/6] Checking required binaries and configs..."
@@ -71,13 +154,6 @@ echo "[3/6] Sending ATI on ${AT_PORT} and checking modem identity..."
 # Configure serial, send ATI, and read a short response window.
 OLD_STTY="$(stty -F "${AT_PORT}" -g 2>/dev/null || true)"
 stty -F "${AT_PORT}" 115200 cs8 -cstopb -parenb -ixon -ixoff -crtscts raw -echo min 0 time 5 2>/dev/null || true
-
-# Restore original serial settings when ATI probing is done.
-cleanup_stty() {
-    if [[ -n "${OLD_STTY}" ]]; then
-        stty -F "${AT_PORT}" "${OLD_STTY}" 2>/dev/null || true
-    fi
-}
 
 # Open the AT device, send ATI, and capture response lines for a few seconds.
 ATI_RESPONSE=""
